@@ -87,9 +87,10 @@
  */
 
 const https = require('https');
+const http = require('http');
 const fs = require('fs');
 const querystring = require('querystring');
-const FormData = require('form-data');
+const path = require('path');
 
 module.exports = function (apiKey) {
   const LOG_TAG = '[PGYER APP UPLOADER]';
@@ -177,22 +178,87 @@ module.exports = function (apiKey) {
         return;
       }
 
-      const uploadAppRequestData = new FormData();
-      uploadAppRequestData.append('signature', uploadData.data.params.signature);
-      uploadAppRequestData.append('x-cos-security-token', uploadData.data.params['x-cos-security-token']);
-      uploadAppRequestData.append('key', uploadData.data.params.key);
-      uploadAppRequestData.append('file', fs.createReadStream(uploadOptions.filePath));
+      const fileSize = statResult.size;
+      const fileName = path.basename(uploadOptions.filePath);
+      const boundary = '----PGYERFormBoundary' + Date.now();
 
-      uploadAppRequestData.submit(uploadData.data.endpoint, function (error, response) {
-        if (error) {
-          callback(error, null);
-          return;
-        }
-        if (response.statusCode === 204) {
-          setTimeout(() => getUploadResult(uploadData), 1000);
-        } else {
-          callback(new Error(LOG_TAG + ' Upload Error!'), null);
-        }
+      // Build multipart form data manually
+      const fields = {
+        'signature': uploadData.data.params.signature,
+        'x-cos-security-token': uploadData.data.params['x-cos-security-token'],
+        'key': uploadData.data.params.key
+      };
+
+      let preFileData = '';
+      for (const [key, value] of Object.entries(fields)) {
+        preFileData += `--${boundary}\r\n`;
+        preFileData += `Content-Disposition: form-data; name="${key}"\r\n\r\n`;
+        preFileData += `${value}\r\n`;
+      }
+
+      preFileData += `--${boundary}\r\n`;
+      preFileData += `Content-Disposition: form-data; name="file"; filename="${fileName}"\r\n`;
+      preFileData += `Content-Type: application/octet-stream\r\n\r\n`;
+
+      const postFileData = `\r\n--${boundary}--\r\n`;
+      const contentLength = Buffer.byteLength(preFileData) + fileSize + Buffer.byteLength(postFileData);
+
+      const parsedUrl = new URL(uploadData.data.endpoint);
+      const isHttps = parsedUrl.protocol === 'https:';
+      const requestModule = isHttps ? https : http;
+
+      const reqOptions = {
+        hostname: parsedUrl.hostname,
+        port: parsedUrl.port || (isHttps ? 443 : 80),
+        path: parsedUrl.pathname + parsedUrl.search,
+        method: 'POST',
+        headers: {
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+          'Content-Length': contentLength,
+          'Connection': 'keep-alive'
+        },
+        // Add timeout settings
+        timeout: 300000 // 5 minutes timeout
+      };
+
+      const req = requestModule.request(reqOptions, (res) => {
+        let responseData = '';
+        res.on('data', (chunk) => {
+          responseData += chunk;
+        });
+        res.on('end', () => {
+          if (res.statusCode === 204) {
+            setTimeout(() => getUploadResult(uploadData), 1000);
+          } else {
+            callback(new Error(LOG_TAG + ' Upload Error! Status: ' + res.statusCode), null);
+          }
+        });
+      });
+
+      req.on('error', (err) => {
+        callback(new Error(LOG_TAG + ' Upload request error: ' + err.message), null);
+      });
+
+      req.on('timeout', () => {
+        req.destroy();
+        callback(new Error(LOG_TAG + ' Upload timeout'), null);
+      });
+
+      // Write form data parts
+      req.write(preFileData);
+
+      // Stream file with error handling
+      const fileStream = fs.createReadStream(uploadOptions.filePath, { highWaterMark: 64 * 1024 });
+
+      fileStream.on('error', (err) => {
+        callback(new Error(LOG_TAG + ' File read error: ' + err.message), null);
+      });
+
+      fileStream.pipe(req, { end: false });
+
+      fileStream.on('end', () => {
+        req.write(postFileData);
+        req.end();
       });
     }
 
