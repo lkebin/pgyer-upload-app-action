@@ -4,7 +4,7 @@ const PGYERAppUploader = require('./PGYERAppUploader');
 
 try {
   const uploadOptions = {
-    log: false,
+    log: true,
   }
 
   const apiKey = core.getInput('_api_key', { required: true });
@@ -52,7 +52,7 @@ try {
   uploader.upload(uploadOptions).then(function (info) {
     core.info(`upload success. app info:`);
     core.info(JSON.stringify(info));
-  }).catch(console.error);
+  });
 
 } catch (error) {
   core.setFailed(error.message);
