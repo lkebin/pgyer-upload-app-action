@@ -1,21 +1,55 @@
 /*
- * PGYER App Uploader - Using Axios with Buffer for Node.js v24 compatibility
+ * PGYER App Uploader - Using native https to avoid Node.js v24 issues
  */
 
-const axios = require('axios');
+const https = require('https');
 const fs = require('fs');
 const path = require('path');
-const https = require('https');
+const { URL } = require('url');
 
-// Create custom axios instance with keep-alive disabled to prevent EPIPE
-const axiosInstance = axios.create({
-  httpsAgent: new https.Agent({
-    keepAlive: false,
-    rejectUnauthorized: true
-  }),
-  // Disable proxy at instance level
-  proxy: false
-});
+function makeRequest(url, options, postData) {
+  return new Promise((resolve, reject) => {
+    const parsedUrl = new URL(url);
+    const reqOptions = {
+      hostname: parsedUrl.hostname,
+      path: parsedUrl.pathname + parsedUrl.search,
+      method: options.method || 'POST',
+      headers: {
+        ...options.headers,
+        'Connection': 'close' // Force connection close after request
+      },
+      // Disable keep-alive at agent level
+      agent: false
+    };
+
+    const req = https.request(reqOptions, (res) => {
+      let data = '';
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => {
+        resolve({ statusCode: res.statusCode, data: data });
+      });
+    });
+
+    req.on('error', (err) => {
+      reject(err);
+    });
+
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('Request timeout'));
+    });
+
+    if (postData) {
+      if (Buffer.isBuffer(postData)) {
+        req.write(postData);
+      } else {
+        req.write(postData);
+      }
+    }
+
+    req.end();
+  });
+}
 
 module.exports = function (apiKey) {
   const LOG_TAG = '[PGYER APP UPLOADER]';
@@ -57,23 +91,26 @@ module.exports = function (apiKey) {
       params.append('buildType', uploadOptions.buildType);
 
       uploadOptions.log && console.log(LOG_TAG + ' [Step 1] Sending token request to pgyer.com...');
-      const tokenResponse = await axiosInstance.post('https://www.pgyer.com/apiv2/app/getCOSToken',
-        params.toString(),
+      const tokenResponse = await makeRequest(
+        'https://www.pgyer.com/apiv2/app/getCOSToken',
         {
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          timeout: 30000,
-          proxy: false // Disable proxy explicitly
-        }
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded'
+          }
+        },
+        params.toString()
       );
-      uploadOptions.log && console.log(LOG_TAG + ' [Step 1] Token received, code: ' + tokenResponse.data.code);
 
-      if (tokenResponse.data.code !== 0) {
-        callback(new Error(LOG_TAG + ' Service down: ' + tokenResponse.data.code + ': ' + tokenResponse.data.message), null);
+      uploadOptions.log && console.log(LOG_TAG + ' [Step 1] Token response status: ' + tokenResponse.statusCode);
+      const tokenData = JSON.parse(tokenResponse.data);
+
+      if (tokenData.code !== 0) {
+        callback(new Error(LOG_TAG + ' Service down: ' + tokenData.code + ': ' + tokenData.message), null);
         return;
       }
 
-      const uploadData = tokenResponse.data;
-      uploadOptions.log && console.log(LOG_TAG + ' [Step 1] Upload endpoint: ' + uploadData.data.endpoint);
+      uploadOptions.log && console.log(LOG_TAG + ' [Step 1] Upload endpoint: ' + tokenData.data.endpoint);
 
       // Step 2: Upload file to COS bucket
       uploadOptions.log && console.log(LOG_TAG + ' [Step 2] Uploading app ... Please Wait ...');
@@ -92,7 +129,7 @@ module.exports = function (apiKey) {
 
       uploadOptions.log && console.log(LOG_TAG + ' [Step 2] File size: ' + statResult.size + ' bytes');
 
-      // Read file into buffer to avoid stream issues
+      // Read file into buffer
       uploadOptions.log && console.log(LOG_TAG + ' [Step 2] Reading file into buffer...');
       const fileBuffer = fs.readFileSync(uploadOptions.filePath);
       const fileName = path.basename(uploadOptions.filePath);
@@ -100,30 +137,25 @@ module.exports = function (apiKey) {
 
       const boundary = '----PGYERBoundary' + Date.now();
 
-      // Build multipart body manually
+      // Build multipart body
       const fields = {
-        'signature': uploadData.data.params.signature,
-        'x-cos-security-token': uploadData.data.params['x-cos-security-token'],
-        'key': uploadData.data.params.key
+        'signature': tokenData.data.params.signature,
+        'x-cos-security-token': tokenData.data.params['x-cos-security-token'],
+        'key': tokenData.data.params.key
       };
 
       const chunks = [];
-
-      // Add fields
       for (const [key, value] of Object.entries(fields)) {
         chunks.push(Buffer.from(`--${boundary}\r\n`));
         chunks.push(Buffer.from(`Content-Disposition: form-data; name="${key}"\r\n\r\n`));
         chunks.push(Buffer.from(value + '\r\n'));
       }
 
-      // Add file
       chunks.push(Buffer.from(`--${boundary}\r\n`));
       chunks.push(Buffer.from(`Content-Disposition: form-data; name="file"; filename="${fileName}"\r\n`));
       chunks.push(Buffer.from('Content-Type: application/octet-stream\r\n\r\n'));
       chunks.push(fileBuffer);
       chunks.push(Buffer.from('\r\n'));
-
-      // End boundary
       chunks.push(Buffer.from(`--${boundary}--\r\n`));
 
       const body = Buffer.concat(chunks);
@@ -131,23 +163,24 @@ module.exports = function (apiKey) {
 
       uploadOptions.log && console.log(LOG_TAG + ' [Step 2] Sending POST request to COS endpoint...');
       uploadOptions.log && console.log(LOG_TAG + ' [Step 2] Request start time: ' + new Date().toISOString());
-      uploadOptions.log && console.log(LOG_TAG + ' [Step 2] Using httpsAgent with keepAlive: false');
-      const uploadResponse = await axiosInstance.post(uploadData.data.endpoint, body, {
-        headers: {
-          'Content-Type': `multipart/form-data; boundary=${boundary}`,
-          'Content-Length': body.length
-        },
-        timeout: 300000, // 5 minutes
-        maxContentLength: Infinity,
-        maxBodyLength: Infinity,
-        validateStatus: (status) => status === 204,
-        proxy: false // Disable proxy explicitly
-      });
-      uploadOptions.log && console.log(LOG_TAG + ' [Step 2] Request completed at: ' + new Date().toISOString());
-      uploadOptions.log && console.log(LOG_TAG + ' [Step 2] Response status: ' + uploadResponse.status);
 
-      if (uploadResponse.status !== 204) {
-        callback(new Error(LOG_TAG + ' Upload Error! Status: ' + uploadResponse.status), null);
+      const uploadResponse = await makeRequest(
+        tokenData.data.endpoint,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': `multipart/form-data; boundary=${boundary}`,
+            'Content-Length': body.length
+          }
+        },
+        body
+      );
+
+      uploadOptions.log && console.log(LOG_TAG + ' [Step 2] Request completed at: ' + new Date().toISOString());
+      uploadOptions.log && console.log(LOG_TAG + ' [Step 2] Response status: ' + uploadResponse.statusCode);
+
+      if (uploadResponse.statusCode !== 204) {
+        callback(new Error(LOG_TAG + ' Upload Error! Status: ' + uploadResponse.statusCode), null);
         return;
       }
 
@@ -155,7 +188,7 @@ module.exports = function (apiKey) {
       uploadOptions.log && console.log(LOG_TAG + ' [Step 3] Getting upload result...');
       uploadOptions.log && console.log(LOG_TAG + ' [Step 3] Current time: ' + new Date().toISOString());
       await new Promise(resolve => setTimeout(resolve, 1000));
-      await getUploadResult(uploadData, callback);
+      await getUploadResult(tokenData, callback);
 
     } catch (error) {
       callback(new Error(LOG_TAG + ' ' + (error.message || 'Unknown error')), null);
@@ -165,17 +198,20 @@ module.exports = function (apiKey) {
   async function getUploadResult(uploadData, callback) {
     try {
       uploadOptions.log && console.log(LOG_TAG + ' [Step 3] Checking build info...');
-      const resultResponse = await axiosInstance.post(
+
+      const resultResponse = await makeRequest(
         `https://www.pgyer.com/apiv2/app/buildInfo?_api_key=${apiKey}&buildKey=${uploadData.data.key}`,
-        '',
         {
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          timeout: 30000,
-          proxy: false // Disable proxy explicitly
-        }
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Content-Length': '0'
+          }
+        },
+        ''
       );
 
-      const responseInfo = resultResponse.data;
+      const responseInfo = JSON.parse(resultResponse.data);
 
       if (responseInfo.code === 1247) {
         uploadOptions.log && console.log(LOG_TAG + ' Parsing App Data ... Please Wait ...');
