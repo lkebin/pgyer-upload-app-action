@@ -32,7 +32,7 @@ outputs:
   info:
     description: 'app information'
 runs:
-  using: 'node16'
+  using: 'node24'
   main: 'dist/index.js'
 branding:
   icon: 'upload-cloud'
