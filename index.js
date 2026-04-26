@@ -7,6 +7,17 @@ try {
     log: true,
   }
 
+  // Debug: Print environment variables related to proxy
+  core.info('[DEBUG] Environment variables:');
+  core.info(`[DEBUG] HTTPS_PROXY: ${process.env.HTTPS_PROXY || '(not set)'}`);
+  core.info(`[DEBUG] https_proxy: ${process.env.https_proxy || '(not set)'}`);
+  core.info(`[DEBUG] HTTP_PROXY: ${process.env.HTTP_PROXY || '(not set)'}`);
+  core.info(`[DEBUG] http_proxy: ${process.env.http_proxy || '(not set)'}`);
+  core.info(`[DEBUG] NODE_TLS_REJECT_UNAUTHORIZED: ${process.env.NODE_TLS_REJECT_UNAUTHORIZED || '(not set)'}`);
+  core.info(`[DEBUG] ALL_PROXY: ${process.env.ALL_PROXY || '(not set)'}`);
+  core.info(`[DEBUG] all_proxy: ${process.env.all_proxy || '(not set)'}`);
+  core.info(`[DEBUG] no_proxy: ${process.env.no_proxy || '(not set)'}`);
+
   const apiKey = core.getInput('_api_key', { required: true });
   if (!apiKey) {
     core.warning('apiKey was not set');
