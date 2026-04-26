@@ -5,6 +5,17 @@
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const https = require('https');
+
+// Create custom axios instance with keep-alive disabled to prevent EPIPE
+const axiosInstance = axios.create({
+  httpsAgent: new https.Agent({
+    keepAlive: false,
+    rejectUnauthorized: true
+  }),
+  // Disable proxy at instance level
+  proxy: false
+});
 
 module.exports = function (apiKey) {
   const LOG_TAG = '[PGYER APP UPLOADER]';
@@ -46,7 +57,7 @@ module.exports = function (apiKey) {
       params.append('buildType', uploadOptions.buildType);
 
       uploadOptions.log && console.log(LOG_TAG + ' [Step 1] Sending token request to pgyer.com...');
-      const tokenResponse = await axios.post('https://www.pgyer.com/apiv2/app/getCOSToken',
+      const tokenResponse = await axiosInstance.post('https://www.pgyer.com/apiv2/app/getCOSToken',
         params.toString(),
         {
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -120,7 +131,8 @@ module.exports = function (apiKey) {
 
       uploadOptions.log && console.log(LOG_TAG + ' [Step 2] Sending POST request to COS endpoint...');
       uploadOptions.log && console.log(LOG_TAG + ' [Step 2] Request start time: ' + new Date().toISOString());
-      const uploadResponse = await axios.post(uploadData.data.endpoint, body, {
+      uploadOptions.log && console.log(LOG_TAG + ' [Step 2] Using httpsAgent with keepAlive: false');
+      const uploadResponse = await axiosInstance.post(uploadData.data.endpoint, body, {
         headers: {
           'Content-Type': `multipart/form-data; boundary=${boundary}`,
           'Content-Length': body.length
@@ -153,7 +165,7 @@ module.exports = function (apiKey) {
   async function getUploadResult(uploadData, callback) {
     try {
       uploadOptions.log && console.log(LOG_TAG + ' [Step 3] Checking build info...');
-      const resultResponse = await axios.post(
+      const resultResponse = await axiosInstance.post(
         `https://www.pgyer.com/apiv2/app/buildInfo?_api_key=${apiKey}&buildKey=${uploadData.data.key}`,
         '',
         {
@@ -168,20 +180,18 @@ module.exports = function (apiKey) {
       if (responseInfo.code === 1247) {
         uploadOptions.log && console.log(LOG_TAG + ' Parsing App Data ... Please Wait ...');
         await new Promise(resolve => setTimeout(resolve, 1000));
-        await getUploadResult(uploadData, callback);
-        return;
+        return await getUploadResult(uploadData, callback);
       }
 
       if (responseInfo.code !== 0) {
-        callback(new Error(LOG_TAG + ' Service down: ' + responseInfo.code + ': ' + responseInfo.message), null);
-        return;
+        return callback(new Error(LOG_TAG + ' Service down: ' + responseInfo.code + ': ' + responseInfo.message), null);
       }
 
       uploadOptions.log && console.log(LOG_TAG + ' [Step 3] Upload completed successfully!');
       uploadOptions.log && console.log(LOG_TAG + ' [Step 3] End time: ' + new Date().toISOString());
-      callback(null, responseInfo);
+      return callback(null, responseInfo);
     } catch (error) {
-      callback(new Error(LOG_TAG + ' ' + error.message), null);
+      return callback(new Error(LOG_TAG + ' ' + error.message), null);
     }
   }
 }
