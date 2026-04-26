@@ -1,10 +1,10 @@
 /*
- * PGYER App Uploader - Using Axios for better compatibility with Node.js v24
+ * PGYER App Uploader - Using Axios with Buffer for Node.js v24 compatibility
  */
 
 const axios = require('axios');
 const fs = require('fs');
-const FormData = require('form-data');
+const path = require('path');
 
 module.exports = function (apiKey) {
   const LOG_TAG = '[PGYER APP UPLOADER]';
@@ -40,11 +40,15 @@ module.exports = function (apiKey) {
       // Step 1: Get upload token
       uploadOptions.log && console.log(LOG_TAG + ' Check API Key ... Please Wait ...');
 
+      const params = new URLSearchParams();
+      params.append('_api_key', apiKey);
+      params.append('buildType', uploadOptions.buildType);
+
       const tokenResponse = await axios.post('https://www.pgyer.com/apiv2/app/getCOSToken',
-        { ...uploadOptions, _api_key: apiKey },
+        params.toString(),
         {
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          timeout: 30000 // 30 seconds timeout for token request
+          timeout: 30000
         }
       );
 
@@ -69,21 +73,47 @@ module.exports = function (apiKey) {
         return;
       }
 
-      // Create form data with file stream
-      const form = new FormData();
-      form.append('signature', uploadData.data.params.signature);
-      form.append('x-cos-security-token', uploadData.data.params['x-cos-security-token']);
-      form.append('key', uploadData.data.params.key);
-      form.append('file', fs.createReadStream(uploadOptions.filePath));
+      // Read file into buffer to avoid stream issues
+      const fileBuffer = fs.readFileSync(uploadOptions.filePath);
+      const fileName = path.basename(uploadOptions.filePath);
+      const boundary = '----PGYERBoundary' + Date.now();
 
-      const uploadResponse = await axios.post(uploadData.data.endpoint, form, {
+      // Build multipart body manually
+      const fields = {
+        'signature': uploadData.data.params.signature,
+        'x-cos-security-token': uploadData.data.params['x-cos-security-token'],
+        'key': uploadData.data.params.key
+      };
+
+      const chunks = [];
+
+      // Add fields
+      for (const [key, value] of Object.entries(fields)) {
+        chunks.push(Buffer.from(`--${boundary}\r\n`));
+        chunks.push(Buffer.from(`Content-Disposition: form-data; name="${key}"\r\n\r\n`));
+        chunks.push(Buffer.from(value + '\r\n'));
+      }
+
+      // Add file
+      chunks.push(Buffer.from(`--${boundary}\r\n`));
+      chunks.push(Buffer.from(`Content-Disposition: form-data; name="file"; filename="${fileName}"\r\n`));
+      chunks.push(Buffer.from('Content-Type: application/octet-stream\r\n\r\n'));
+      chunks.push(fileBuffer);
+      chunks.push(Buffer.from('\r\n'));
+
+      // End boundary
+      chunks.push(Buffer.from(`--${boundary}--\r\n`));
+
+      const body = Buffer.concat(chunks);
+
+      const uploadResponse = await axios.post(uploadData.data.endpoint, body, {
         headers: {
-          ...form.getHeaders()
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+          'Content-Length': body.length
         },
-        timeout: 300000, // 5 minutes timeout for file upload
+        timeout: 300000, // 5 minutes
         maxContentLength: Infinity,
         maxBodyLength: Infinity,
-        // Handle stream errors properly
         validateStatus: (status) => status === 204
       });
 
@@ -105,7 +135,7 @@ module.exports = function (apiKey) {
     try {
       const resultResponse = await axios.post(
         `https://www.pgyer.com/apiv2/app/buildInfo?_api_key=${apiKey}&buildKey=${uploadData.data.key}`,
-        {},
+        '',
         {
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           timeout: 30000
